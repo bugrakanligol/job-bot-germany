@@ -1,0 +1,6 @@
+.env
+jobs.db
+data/cv.pdf
+__pycache__
+*.pyc
+.playwright/
