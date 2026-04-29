@@ -1,16 +1,17 @@
+import json
 import logging
 import random
 import time
 from typing import Optional
 
 import requests
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
-API_BASE = "https://api.arbeitsagentur.de/jobsuche/pc/v4"
+API_BASE = "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v6"
 SEARCH_URL = f"{API_BASE}/jobs"
-DETAIL_URL = f"{API_BASE}/jobdetails"
-PUBLIC_DETAIL_URL = "https://www.arbeitsagentur.de/jobsuche/jobdetail"
+PUBLIC_DETAIL_BASE = "https://www.arbeitsagentur.de/jobsuche/jobdetail"
 
 DEFAULT_KEYWORDS = [
     "Supply Chain",
@@ -27,58 +28,64 @@ API_HEADERS = {
     "X-API-Key": "jobboerse-jobsuche",
 }
 
+HTML_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "de-DE,de;q=0.9",
+}
+
 
 def _polite_sleep() -> None:
     time.sleep(random.uniform(1.0, 2.0))
 
 
 def _safe_get_location(item: dict) -> Optional[str]:
-    aort = item.get("arbeitsort") or {}
-    parts = [aort.get("ort"), aort.get("region"), aort.get("land")]
+    locs = item.get("stellenlokationen") or []
+    if not locs:
+        return None
+    adr = locs[0].get("adresse") or {}
+    parts = [adr.get("ort"), adr.get("region"), adr.get("land")]
     parts = [p for p in parts if p]
     return ", ".join(parts) if parts else None
 
 
-def _fetch_detail(hash_id: str) -> Optional[dict]:
-    url = f"{DETAIL_URL}/{hash_id}"
+def _fetch_description(referenznummer: str) -> Optional[str]:
+    url = f"{PUBLIC_DETAIL_BASE}/{referenznummer}"
     try:
-        resp = requests.get(url, headers=API_HEADERS, timeout=20)
+        resp = requests.get(url, headers=HTML_HEADERS, timeout=20)
         if resp.status_code != 200:
-            logger.debug("Bundesagentur detail %s -> %d", hash_id, resp.status_code)
+            logger.debug("BA detail page %s -> %d", referenznummer, resp.status_code)
             return None
-        return resp.json()
-    except requests.RequestException as e:
-        logger.debug("Bundesagentur detail fetch failed for %s: %s", hash_id, e)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        state_tag = soup.find(id="ng-state")
+        if not state_tag:
+            return None
+        state = json.loads(state_tag.text)
+        job_detail = state.get("jobdetail") or {}
+        return job_detail.get("stellenangebotsBeschreibung") or None
+    except Exception as e:
+        logger.debug("BA description fetch failed for %s: %s", referenznummer, e)
         return None
-    except ValueError:
-        return None
-
-
-def _build_description(detail: Optional[dict], item: dict) -> Optional[str]:
-    if detail:
-        for key in ("stellenbeschreibung", "beschreibung", "stellenangebotsBeschreibung"):
-            val = detail.get(key)
-            if val and isinstance(val, str) and val.strip():
-                return val.strip()
-
-    return item.get("beruf") or item.get("titel")
 
 
 def _parse_item(item: dict, fetch_details: bool = True) -> Optional[dict]:
-    hash_id = item.get("hashId") or item.get("refnr")
-    title = item.get("titel") or item.get("beruf")
-    if not hash_id or not title:
+    ref = item.get("referenznummer")
+    title = item.get("stellenangebotsTitel") or item.get("hauptberuf")
+    if not ref or not title:
         return None
 
-    company = item.get("arbeitgeber")
+    company = item.get("firma")
     location = _safe_get_location(item)
-    public_url = f"{PUBLIC_DETAIL_URL}/{hash_id}"
+    public_url = f"{PUBLIC_DETAIL_BASE}/{ref}"
 
-    detail = _fetch_detail(hash_id) if fetch_details else None
+    description: Optional[str] = None
     if fetch_details:
+        description = _fetch_description(ref)
         _polite_sleep()
 
-    description = _build_description(detail, item)
+    if not description:
+        berufe = item.get("alleBerufe") or []
+        description = item.get("hauptberuf") or (", ".join(berufe) if berufe else None)
 
     return {
         "title": title,
@@ -90,7 +97,7 @@ def _parse_item(item: dict, fetch_details: bool = True) -> Optional[dict]:
     }
 
 
-def _search(keyword: str, page: int = 0, size: int = 50) -> list[dict]:
+def _search(keyword: str, page: int = 1, size: int = 50) -> list[dict]:
     params = {
         "was": keyword,
         "wo": "Deutschland",
@@ -113,7 +120,7 @@ def _search(keyword: str, page: int = 0, size: int = 50) -> list[dict]:
         logger.warning("Bundesagentur returned invalid JSON for '%s': %s", keyword, e)
         return []
 
-    return data.get("stellenangebote", []) or []
+    return data.get("ergebnisliste", []) or []
 
 
 def scrape_bundesagentur(

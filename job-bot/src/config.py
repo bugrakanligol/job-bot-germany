@@ -11,7 +11,9 @@ DB_PATH = ROOT_DIR / "jobs.db"
 load_dotenv(ROOT_DIR / ".env")
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-ANTHROPIC_MODEL = "claude-sonnet-4-6"
+ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+
+SCORING_CHUNK_SIZE = 10  # jobs per API call
 
 SCORE_THRESHOLD = 70
 
